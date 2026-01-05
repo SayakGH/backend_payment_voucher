@@ -4,6 +4,7 @@ const {
   ScanCommand,
   GetCommand,
   DeleteCommand,
+  TransactWriteCommand,
 } = require("@aws-sdk/lib-dynamodb");
 const generatePaymentId = require("../utils/generatePaymentId");
 const { dynamoDB } = require("../config/dynamo");
@@ -28,35 +29,30 @@ const createPayment = async ({
   if (itemsTotal <= 0) throw new Error("Invalid itemsTotal");
   if (total <= 0) throw new Error("Invalid total");
 
-  /* 1️⃣ Load Project */
   const project = await projectRepo.getProjectById(projectId);
   if (!project) throw new Error("Project not found");
 
-  /* 2️⃣ Load Vendor */
   const vendor = await vendorRepo.findVendorById(project.vendorId);
   if (!vendor) throw new Error("Vendor not found");
 
-  /* 3️⃣ Company Snapshot */
   const company = COMPANY_MASTER[project.companyName];
   if (!company)
     throw new Error(`Company config not found: ${project.companyName}`);
 
   if (paymentSummary.mode === "Cheque") {
-    if (!paymentSymmary.bankName || !paymentSummary.chequeNumber) {
+    if (!paymentSummary.bankName || !paymentSummary.chequeNumber) {
       throw new Error(
         "bankName and chequeNumber are required for Cheque payments"
       );
     }
   }
 
-  /* 4️⃣ Build Voucher */
   const now = new Date();
   const istDate = new Date(now.getTime() + 5.5 * 60 * 60 * 1000);
 
   const payment = {
     _id: generatePaymentId(),
     projectId,
-
     vendor: {
       name: vendor.name,
       gstin: vendor.gstin || "",
@@ -64,7 +60,6 @@ const createPayment = async ({
       pan: vendor.pan,
       phone: vendor.phone,
     },
-
     company: {
       name: company.name,
       address: company.address,
@@ -82,36 +77,39 @@ const createPayment = async ({
     itemsTotal,
     gst,
     total,
-
     createdAt: istDate.toISOString(),
   };
 
-  /* 5️⃣ Save Payment */
+  // 🔒 ATOMIC TRANSACTION
   await dynamoDB.send(
-    new PutCommand({
-      TableName: PAYMENT_TABLE,
-      Item: payment,
-    })
-  );
-
-  /* 6️⃣ Correct Ledger Update (Billed ↑ , Paid ↑ , Balance auto-calculated) */
-  await dynamoDB.send(
-    new UpdateCommand({
-      TableName: PROJECT_TABLE,
-      Key: { _id: projectId },
-      UpdateExpression: `
-      SET 
-        billed = if_not_exists(billed, :zero) + :amt,
-        paid   = if_not_exists(paid, :zero) + :amt
-    `,
-      ExpressionAttributeValues: {
-        ":amt": total,
-        ":zero": 0,
-      },
-      ConditionExpression: "attribute_exists(#id)",
-      ExpressionAttributeNames: {
-        "#id": "_id",
-      },
+    new TransactWriteCommand({
+      TransactItems: [
+        {
+          Put: {
+            TableName: PAYMENT_TABLE,
+            Item: payment,
+            ConditionExpression: "attribute_not_exists(#id)",
+            ExpressionAttributeNames: { "#id": "_id" },
+          },
+        },
+        {
+          Update: {
+            TableName: PROJECT_TABLE,
+            Key: { _id: projectId },
+            UpdateExpression: `
+              SET 
+                billed = if_not_exists(billed, :zero) + :amt,
+                paid   = if_not_exists(paid, :zero) + :amt
+            `,
+            ExpressionAttributeValues: {
+              ":amt": total,
+              ":zero": 0,
+            },
+            ConditionExpression: "attribute_exists(#id)",
+            ExpressionAttributeNames: { "#id": "_id" },
+          },
+        },
+      ],
     })
   );
 
@@ -140,51 +138,51 @@ const getPaymentsByProjectId = async (projectId) => {
 const deletePayment = async (paymentId) => {
   if (!paymentId) throw new Error("paymentId is required");
 
-  try {
-    /* 1️⃣ Load payment */
-    const res = await dynamoDB.send(
-      new GetCommand({
-        TableName: PAYMENT_TABLE,
-        Key: { _id: paymentId },
-      })
-    );
+  // Load payment first
+  const res = await dynamoDB.send(
+    new GetCommand({
+      TableName: PAYMENT_TABLE,
+      Key: { _id: paymentId },
+    })
+  );
 
-    if (!res.Item) throw new Error("Payment not found");
+  if (!res.Item) throw new Error("Payment not found");
 
-    const { projectId, total } = res.Item;
+  const { projectId, total } = res.Item;
 
-    /* 2️⃣ Delete payment */
-    await dynamoDB.send(
-      new DeleteCommand({
-        TableName: PAYMENT_TABLE,
-        Key: { _id: paymentId },
-      })
-    );
-
-    /* 3️⃣ Reverse ledger */
-    await dynamoDB.send(
-      new UpdateCommand({
-        TableName: PROJECT_TABLE,
-        Key: { _id: projectId },
-        UpdateExpression: `
-          SET 
-            billed = billed - :amt,
-            paid   = paid   - :amt
-        `,
-        ConditionExpression: "attribute_exists(#id)",
-        ExpressionAttributeNames: {
-          "#id": "_id",
+  // 🔒 ATOMIC DELETE + LEDGER REVERSE
+  await dynamoDB.send(
+    new TransactWriteCommand({
+      TransactItems: [
+        {
+          Delete: {
+            TableName: PAYMENT_TABLE,
+            Key: { _id: paymentId },
+            ConditionExpression: "attribute_exists(#id)",
+            ExpressionAttributeNames: { "#id": "_id" },
+          },
         },
-        ExpressionAttributeValues: {
-          ":amt": total,
+        {
+          Update: {
+            TableName: PROJECT_TABLE,
+            Key: { _id: projectId },
+            UpdateExpression: `
+              SET 
+                billed = billed - :amt,
+                paid   = paid   - :amt
+            `,
+            ExpressionAttributeValues: {
+              ":amt": total,
+            },
+            ConditionExpression: "attribute_exists(#id)",
+            ExpressionAttributeNames: { "#id": "_id" },
+          },
         },
-      })
-    );
+      ],
+    })
+  );
 
-    return { success: true };
-  } catch (err) {
-    throw new Error(`Delete Payment Failed: ${err.message}`);
-  }
+  return { success: true };
 };
 
 const deleteAllPaymentsByProject = async (projectId) => {
@@ -229,19 +227,17 @@ const getLast30DaysPayments = async () => {
     const payments = result.Items || [];
 
     /* ============================
-       Today & start (IST calendar)
+       Create IST "Today"
     ============================ */
     const now = new Date();
-    const istNow = new Date(
-      now.toLocaleString("en-US", { timeZone: "Asia/Kolkata" })
-    );
+    const istNow = new Date(now.getTime() + 5.5 * 60 * 60 * 1000);
     istNow.setHours(0, 0, 0, 0);
 
     const startDate = new Date(istNow);
     startDate.setDate(startDate.getDate() - 29);
 
     /* ============================
-       Create date map (IST days)
+       Create date map (TRUE IST KEYS)
     ============================ */
     const dateMap = {};
 
@@ -249,7 +245,11 @@ const getLast30DaysPayments = async () => {
       const d = new Date(startDate);
       d.setDate(startDate.getDate() + i);
 
-      const key = d.toISOString().split("T")[0];
+      const y = d.getFullYear();
+      const m = String(d.getMonth() + 1).padStart(2, "0");
+      const day = String(d.getDate()).padStart(2, "0");
+
+      const key = `${y}-${m}-${day}`; // IST date key
 
       dateMap[key] = {
         price: 0,
@@ -264,7 +264,8 @@ const getLast30DaysPayments = async () => {
     for (const p of payments) {
       if (!p.createdAt || !p.total) continue;
 
-      const key = p.createdAt.split("T")[0]; // IST date key
+      // DB timestamp already treated as IST
+      const key = p.createdAt.split("T")[0];
 
       if (dateMap[key]) {
         dateMap[key].price += Number(p.total);

@@ -1,9 +1,8 @@
 const {
-  PutCommand,
-  UpdateCommand,
   ScanCommand,
   DeleteCommand,
   GetCommand,
+  TransactWriteCommand,
 } = require("@aws-sdk/lib-dynamodb");
 const { randomUUID } = require("crypto");
 const { dynamoDB } = require("../config/dynamo");
@@ -14,10 +13,8 @@ const PROJECT_TABLE = "payment_app_projects";
 const createBill = async ({ projectId, description, amount }) => {
   if (!projectId) throw new Error("projectId is required");
   if (!description) throw new Error("description is required");
-  if (!amount || amount <= 0)
-    throw new Error("Bill amount must be greater than 0");
+  if (!amount || amount <= 0) throw new Error("Invalid amount");
 
-  // IST Time
   const now = new Date();
   const istDate = new Date(now.getTime() + 5.5 * 60 * 60 * 1000);
 
@@ -29,40 +26,39 @@ const createBill = async ({ projectId, description, amount }) => {
     createdAt: istDate.toISOString(),
   };
 
-  try {
-    /* 1️⃣ Save Bill */
-    await dynamoDB.send(
-      new PutCommand({
-        TableName: BILL_TABLE,
-        Item: bill,
-      })
-    );
-
-    /* 2️⃣ Atomically update Project */
-    await dynamoDB.send(
-      new UpdateCommand({
-        TableName: PROJECT_TABLE,
-        Key: { _id: projectId },
-        UpdateExpression: `
-          SET 
-            billed = if_not_exists(billed, :zero) + :amt,
-            balance = if_not_exists(balance, :zero) + :amt
-        `,
-        ConditionExpression: "attribute_exists(#id)",
-        ExpressionAttributeNames: {
-          "#id": "_id",
+  await dynamoDB.send(
+    new TransactWriteCommand({
+      TransactItems: [
+        {
+          Put: {
+            TableName: BILL_TABLE,
+            Item: bill,
+            ConditionExpression: "attribute_not_exists(#id)",
+            ExpressionAttributeNames: { "#id": "_id" },
+          },
         },
-        ExpressionAttributeValues: {
-          ":amt": amount,
-          ":zero": 0,
+        {
+          Update: {
+            TableName: PROJECT_TABLE,
+            Key: { _id: projectId },
+            UpdateExpression: `
+              SET 
+                billed  = if_not_exists(billed, :zero) + :amt,
+                balance = if_not_exists(balance, :zero) + :amt
+            `,
+            ExpressionAttributeValues: {
+              ":amt": amount,
+              ":zero": 0,
+            },
+            ConditionExpression: "attribute_exists(#id)",
+            ExpressionAttributeNames: { "#id": "_id" },
+          },
         },
-      })
-    );
+      ],
+    })
+  );
 
-    return bill;
-  } catch (err) {
-    throw new Error(`Create Bill Failed: ${err.message}`);
-  }
+  return bill;
 };
 
 const getBillsByProject = async (projectId) => {
@@ -89,52 +85,51 @@ const getBillsByProject = async (projectId) => {
 const deleteBill = async (billId) => {
   if (!billId) throw new Error("billId is required");
 
-  try {
-    // 1️⃣ Fetch the bill
-    const billRes = await dynamoDB.send(
-      new GetCommand({
-        TableName: BILL_TABLE,
-        Key: { _id: billId },
-      })
-    );
+  const billRes = await dynamoDB.send(
+    new GetCommand({
+      TableName: BILL_TABLE,
+      Key: { _id: billId },
+    })
+  );
 
-    if (!billRes.Item) throw new Error("Bill not found");
+  if (!billRes.Item) throw new Error("Bill not found");
 
-    const { projectId, amount } = billRes.Item;
+  const { projectId, amount } = billRes.Item;
 
-    // 2️⃣ Delete the bill
-    await dynamoDB.send(
-      new DeleteCommand({
-        TableName: BILL_TABLE,
-        Key: { _id: billId },
-      })
-    );
-
-    // 3️⃣ Reverse its effect on project
-    await dynamoDB.send(
-      new UpdateCommand({
-        TableName: PROJECT_TABLE,
-        Key: { _id: projectId },
-        UpdateExpression: `
-          SET 
-            billed = billed - :amt,
-            balance = balance - :amt
-        `,
-        ConditionExpression: "attribute_exists(#id)",
-        ExpressionAttributeNames: {
-          "#id": "_id",
+  await dynamoDB.send(
+    new TransactWriteCommand({
+      TransactItems: [
+        {
+          Delete: {
+            TableName: BILL_TABLE,
+            Key: { _id: billId },
+            ConditionExpression: "attribute_exists(#id)",
+            ExpressionAttributeNames: { "#id": "_id" },
+          },
         },
-        ExpressionAttributeValues: {
-          ":amt": amount,
+        {
+          Update: {
+            TableName: PROJECT_TABLE,
+            Key: { _id: projectId },
+            UpdateExpression: `
+              SET 
+                billed  = billed - :amt,
+                balance = balance - :amt
+            `,
+            ExpressionAttributeValues: {
+              ":amt": amount,
+            },
+            ConditionExpression: "attribute_exists(#id)",
+            ExpressionAttributeNames: { "#id": "_id" },
+          },
         },
-      })
-    );
+      ],
+    })
+  );
 
-    return { success: true };
-  } catch (err) {
-    throw new Error(`Delete Bill Failed: ${err.message}`);
-  }
+  return { success: true };
 };
+
 const deleteAllBillsByProject = async (projectId) => {
   if (!projectId) throw new Error("projectId is required");
 
