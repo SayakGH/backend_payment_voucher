@@ -12,12 +12,16 @@ const {
   deleteBill,
   deleteProject,
   deleteVendor,
+  deleteVendorv2,
 } = require("../controllers/vendorController");
 const {
   createPayment,
+  createPaymentv2,
   getProjectPayments,
   deletePayment,
   getPaymentById,
+  getVendorPayments,
+  deleteVendorPayments,
 } = require("../controllers/paymentController");
 
 router.post("/create", auth, createVendor);
@@ -27,12 +31,40 @@ router.post("/create/project", auth, createProjects);
 router.get("/bills/:projectId", auth, getProjectBills);
 router.post("/create/bill", auth, createProjectBill);
 router.get("/payments/:projectId", auth, getProjectPayments);
+router.get("/payments/vendor/:vendorId", auth, getVendorPayments);
 router.post("/create/payment", auth, createPayment);
+router.post("/create/payment/v2", auth, createPaymentv2);
 router.get("/single/payment/:id", auth, getPaymentById);
 
-router.delete("/delete/bill/:billId", auth, deleteBill);
-router.delete("/delete/payment/:paymentId", auth, deletePayment);
-router.delete("/delete/project/:projectId", auth, deleteProject);
-router.delete("/delete/vendor/:vendorId", auth, deleteVendor);
+router.delete(
+  "/delete/vendor/payments/:vendorId",
+  auth,
+  authorizeRoles("admin"),
+  deleteVendorv2
+);
+router.delete(
+  "/delete/bill/:billId",
+  auth,
+  authorizeRoles("admin"),
+  deleteBill
+);
+router.delete(
+  "/delete/payment/:paymentId",
+  auth,
+  authorizeRoles("admin"),
+  deletePayment
+);
+router.delete(
+  "/delete/project/:projectId",
+  auth,
+  authorizeRoles("admin"),
+  deleteProject
+);
+router.delete(
+  "/delete/vendor/:vendorId",
+  auth,
+  authorizeRoles("admin"),
+  deleteVendor
+);
 
 module.exports = router;

@@ -29,7 +29,7 @@ const findVendorById = async (id) => {
   }
 };
 
-const createVendor = async ({ name, phone, address, pan, gstin }) => {
+const createVendor = async ({ name, phone, address, pan, gstin, type }) => {
   const now = new Date();
   const istDate = new Date(now.getTime() + 5.5 * 60 * 60 * 1000);
   const vendor = {
@@ -38,6 +38,7 @@ const createVendor = async ({ name, phone, address, pan, gstin }) => {
     phone,
     address,
     pan,
+    type,
     createdAt: istDate.toISOString(),
   };
 
@@ -68,7 +69,17 @@ const getAllVendors = async () => {
   try {
     const command = new ScanCommand(params);
     const res = await dynamoDB.send(command);
-    return res.Items || [];
+
+    const vendors = res.Items || [];
+
+    // 🔥 Latest first (newest createdAt on top)
+    vendors.sort((a, b) => {
+      if (!a.createdAt) return 1;
+      if (!b.createdAt) return -1;
+      return new Date(b.createdAt) - new Date(a.createdAt);
+    });
+
+    return vendors;
   } catch (err) {
     throw new Error(`DynamoDB Vendor Scan Error: ${err.message}`);
   }

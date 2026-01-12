@@ -5,7 +5,7 @@ const paymentRepo = require("../repository/payments.repo");
 
 exports.createVendor = async (req, res) => {
   try {
-    const { name, phone, address, pan, gstin } = req.body;
+    const { name, phone, address, pan, gstin, type } = req.body;
 
     if (!name || !phone || !address || !pan) {
       return res.status(400).json({
@@ -20,6 +20,7 @@ exports.createVendor = async (req, res) => {
       address,
       pan,
       gstin,
+      type,
     });
 
     return res.status(201).json({
@@ -241,6 +242,49 @@ exports.deleteVendor = async (req, res) => {
     return res.status(200).json({
       success: true,
       message: "Vendor and all related data deleted successfully",
+    });
+  } catch (error) {
+    console.error("Delete Vendor Error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: error.message || "Failed to delete vendor",
+    });
+  }
+};
+
+exports.deleteVendorv2 = async (req, res) => {
+  try {
+    const { vendorId } = req.params;
+
+    if (!vendorId) {
+      return res.status(400).json({
+        success: false,
+        message: "vendorId is required",
+      });
+    }
+
+    // 1️⃣ Ensure vendor exists
+    const vendor = await vendorRepo.findVendorById(vendorId);
+    if (!vendor) {
+      return res.status(404).json({
+        success: false,
+        message: "Vendor not found",
+      });
+    }
+
+    // 2️⃣ Delete all vendor payments
+    const paymentResult = await paymentRepo.deleteAllPaymentsByVendorId(
+      vendorId
+    );
+
+    // 3️⃣ Delete vendor
+    await vendorRepo.deleteVendorById(vendorId);
+
+    return res.status(200).json({
+      success: true,
+      message: "Vendor and related payments deleted successfully",
+      paymentsDeleted: paymentResult.deleted,
     });
   } catch (error) {
     console.error("Delete Vendor Error:", error);
